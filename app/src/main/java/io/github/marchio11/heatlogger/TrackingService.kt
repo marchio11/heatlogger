@@ -122,6 +122,7 @@ class TrackingService : Service() {
     private var currentSsid: String? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var wifiLostAt: Long? = null
+    private var wifiOverride: String? = null // rete da ignorare finché non ci si ricollega (partiti in auto)
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.ITALY)
 
@@ -167,7 +168,9 @@ class TrackingService : Service() {
         }
 
         // Se l'app era stata chiusa di colpo, chiude attività e pause rimaste aperte
-        db.closeDangling(db.lastPointTime() ?: System.currentTimeMillis())
+        val lastTime = db.lastPointTime()
+        db.closeDangling(lastTime ?: System.currentTimeMillis())
+        lastInsertedTime = lastTime ?: 0L // evita di risalvare la stessa posizione dopo un riavvio
 
         prefs.sp.registerOnSharedPreferenceChangeListener(prefListener)
         startActivityRecognition()
@@ -244,7 +247,7 @@ class TrackingService : Service() {
     }.getOrNull()?.takeIf { it in 0..100 }
 
     private fun handleLocation(loc: Location, kind: String) {
-        if (loc.time == lastInsertedTime) return // stessa posizione già salvata
+        if (loc.time <= lastInsertedTime) return // posizione già salvata (o più vecchia)
         lastInsertedTime = loc.time
         val prev = lastFix
         val spd: Float? = when {
@@ -337,12 +340,30 @@ class TrackingService : Service() {
     fun onActivity(type: Int, confidence: Int) {
         val m = modeOf(type) ?: return
         prefs.setStatus("detected", "${m.label} ($confidence%)")
-        // Sul Wi-Fi di casa/lavoro i movimenti tra una stanza e l'altra non contano
-        if (pauseReason?.startsWith("wifi") == true) return
-
         if (m == candidate) candidateCount++ else { candidate = m; candidateCount = 1 }
-        val accepted = confidence >= 75 || (candidateCount >= 2 && confidence >= 50)
-        if (!accepted) return
+        val sure = confidence >= 75 || (candidateCount >= 2 && confidence >= 50)
+
+        if (pauseReason?.startsWith("wifi") == true) {
+            // Sul Wi-Fi di casa/lavoro i movimenti tra una stanza e l'altra non contano,
+            // ma se si parte in auto il Wi-Fi è ancora agganciato: si riparte subito
+            if (m == Mode.VEHICLE && sure) {
+                wifiOverride = pauseSsid
+                main.removeCallbacks(wifiEndCheck)
+                wifiLostAt = null
+                endPause(System.currentTimeMillis())
+                setMode(Mode.VEHICLE, confidence)
+            }
+            return
+        }
+
+        // Isteresi: un semaforo o una sosta del cane non sono un "arrivo"
+        val moving = mode == Mode.VEHICLE || mode == Mode.BICYCLE || mode == Mode.RUNNING || mode == Mode.WALKING
+        val needed = when {
+            m == Mode.STILL && moving -> 3
+            mode == Mode.VEHICLE && m != Mode.VEHICLE -> 2
+            else -> 1
+        }
+        if (!sure || candidateCount < needed) return
 
         if (m == Mode.STILL) {
             if (stillSince == null) stillSince = System.currentTimeMillis()
@@ -455,6 +476,7 @@ class TrackingService : Service() {
     }
 
     private fun onWifi(ssid: String?) {
+        if (ssid != wifiOverride) wifiOverride = null
         currentSsid = ssid
         prefs.setStatus("ssid", ssid ?: "")
         val reason = when {
@@ -463,15 +485,17 @@ class TrackingService : Service() {
             prefs.workSsids.contains(ssid) -> "wifi_lavoro"
             else -> null
         }
-        if (reason != null) {
+        if (reason != null && ssid == wifiOverride) {
+            // ancora agganciati al Wi-Fi di casa ma già in viaggio: non rientro in pausa
+        } else if (reason != null) {
             wifiLostAt = null
             main.removeCallbacks(wifiEndCheck)
             startPause(reason, ssid)
         } else if (pauseReason?.startsWith("wifi") == true && wifiLostAt == null) {
-            // Il Wi-Fi a volte cade per pochi secondi: aspetto un minuto prima di chiudere la pausa
+            // Il Wi-Fi a volte cade per pochi secondi: aspetto mezzo minuto prima di chiudere la pausa
             wifiLostAt = System.currentTimeMillis()
             main.removeCallbacks(wifiEndCheck)
-            main.postDelayed(wifiEndCheck, 60_000L)
+            main.postDelayed(wifiEndCheck, 30_000L)
         }
         updateStatus()
     }
