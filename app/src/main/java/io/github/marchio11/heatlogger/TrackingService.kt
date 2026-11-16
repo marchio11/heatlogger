@@ -2,6 +2,7 @@ package io.github.marchio11.heatlogger
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -24,6 +25,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.ActivityRecognition
@@ -117,6 +120,7 @@ class TrackingService : Service() {
     private var fastFixes = 0
     private var slowSince: Long? = null
     private var requestKey: String? = null
+    private var refining = false
 
     // Wi-Fi
     private var currentSsid: String? = null
@@ -144,7 +148,7 @@ class TrackingService : Service() {
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when {
             key == null -> Unit
-            key.startsWith("interval_") || key == "heartbeat_minutes" -> { requestKey = null; applyRequest() }
+            key.startsWith("interval_") || key == "heartbeat_minutes" -> { requestKey = null; cancelHeartbeat(); applyRequest() }
             key.startsWith("wifi_") -> onWifi(currentSsid)
             key.startsWith("drive_") || key.startsWith("qs_minutes") -> Uploads.schedule(this)
         }
@@ -189,6 +193,7 @@ class TrackingService : Service() {
         main.removeCallbacksAndMessages(null)
         prefs.sp.unregisterOnSharedPreferenceChangeListener(prefListener)
         fused.removeLocationUpdates(locationCallback)
+        cancelHeartbeat()
         if (activityUpdatesOn) ActivityRecognition.getClient(this).removeActivityUpdates(activityPendingIntent())
         netCallback?.let { runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }
         val now = System.currentTimeMillis()
@@ -217,18 +222,22 @@ class TrackingService : Service() {
         val seconds = when {
             !paused -> intervalFor(mode)
             pauseReason == "immobile" && !activityUpdatesOn -> 120
-            else -> prefs.heartbeatMinutes * 60
+            else -> 0 // in pausa il battito arriva da una sveglia di sistema (vedi scheduleHeartbeat)
         }
+        if (paused) scheduleHeartbeat() else cancelHeartbeat()
         val key = "$priority/$seconds"
         if (key == requestKey) return
         requestKey = key
         fused.removeLocationUpdates(locationCallback)
+        prefs.setStatus("interval", if (paused) "battito ogni ${prefs.heartbeatMinutes} min" else "un punto ogni $seconds s")
+        if (seconds == 0) return
         val req = LocationRequest.Builder(priority, seconds * 1000L)
-            .setMinUpdateIntervalMillis(seconds * 1000L)
+            // Margine: se un'altra app (es. GPSLogger) fa arrivare le posizioni ogni 52 s,
+            // con un minimo di 60 s se ne perderebbe una su due
+            .setMinUpdateIntervalMillis(seconds * 2000L / 3)
             .setWaitForAccurateLocation(false)
             .build()
         fused.requestLocationUpdates(req, locationCallback, Looper.getMainLooper())
-        prefs.setStatus("interval", if (paused) "battito ogni ${prefs.heartbeatMinutes} min" else "un punto ogni $seconds s")
     }
 
     /** Un punto subito, per segnare con precisione partenze, arrivi e cambi di modo. */
@@ -240,6 +249,81 @@ class TrackingService : Service() {
             .build()
         fused.getCurrentLocation(req, CancellationTokenSource().token)
             .addOnSuccessListener { loc -> if (loc != null) handleLocation(loc, "transition") }
+    }
+
+    /** Posizione imprecisa mentre ci si muove (GPS non ancora agganciato): ne chiedo subito una migliore. */
+    private fun refine(badAcc: Float) {
+        if (refining) return
+        refining = true
+        val req = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+            .setMaxUpdateAgeMillis(0L)
+            .setDurationMillis(20_000L)
+            .build()
+        fused.getCurrentLocation(req, CancellationTokenSource().token)
+            .addOnCompleteListener { t ->
+                val loc = if (t.isSuccessful) t.result else null
+                if (loc != null && pauseId == null && loc.hasAccuracy() && loc.accuracy < badAcc) handleLocation(loc, "fix")
+                refining = false
+            }
+    }
+
+    // ------------------------------------------------------------------ Battito (in pausa)
+
+    // Con il telefono immobile per ore Android entra in "Doze" e rimanda le richieste di posizione:
+    // il 16/11 il battito è sparito per oltre 2 ore. Una sveglia "allowWhileIdle" passa anche in Doze.
+    private fun heartbeatIntent(): PendingIntent = PendingIntent.getBroadcast(
+        this, 2, Intent(this, HeartbeatReceiver::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private var heartbeatScheduled = false
+
+    private fun scheduleHeartbeat(force: Boolean = false) {
+        if (heartbeatScheduled && !force) return
+        heartbeatScheduled = true
+        getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + prefs.heartbeatMinutes * 60_000L,
+            heartbeatIntent(),
+        )
+    }
+
+    private fun cancelHeartbeat() {
+        if (!heartbeatScheduled) return
+        heartbeatScheduled = false
+        getSystemService(AlarmManager::class.java).cancel(heartbeatIntent())
+    }
+
+    fun onHeartbeatAlarm() {
+        heartbeatScheduled = false
+        if (pauseId == null) return
+        scheduleHeartbeat()
+        val wl = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "heatlogger:heartbeat").apply { acquire(45_000L) }
+        val req = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
+            .setMaxUpdateAgeMillis(5 * 60_000L)
+            .setDurationMillis(30_000L)
+            .build()
+        fused.getCurrentLocation(req, CancellationTokenSource().token)
+            .addOnCompleteListener { t ->
+                val fresh = if (t.isSuccessful) t.result else null
+                if (pauseId != null) {
+                    if (fresh != null && fresh.time > lastInsertedTime) {
+                        handleLocation(fresh, "heartbeat")
+                    } else {
+                        // Nessuna posizione nuova (Doze, chiuso in casa): il battito c'è lo stesso,
+                        // con l'ultima posizione nota e l'ora attuale; prov "cached" lo dichiara
+                        (fresh ?: anchor ?: lastFix)?.let { Location(it) }?.let { l ->
+                            l.time = System.currentTimeMillis()
+                            l.provider = "cached"
+                            handleLocation(l, "heartbeat")
+                        }
+                    }
+                }
+                if (wl.isHeld) wl.release()
+            }
     }
 
     private fun battery(): Int? = runCatching {
@@ -272,6 +356,7 @@ class TrackingService : Service() {
         )
         if (kind != "heartbeat") lastFix = loc
         val acc = if (loc.hasAccuracy()) loc.accuracy else 50f
+        if (pauseId == null && kind == "fix" && acc > 40f) refine(acc)
         prefs.setStatus("last", "${timeFmt.format(Date(loc.time))} · ±${acc.toInt()} m · $kind")
 
         if (pauseId != null) {
