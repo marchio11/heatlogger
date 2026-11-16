@@ -1,0 +1,54 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Compila l'APK
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease -PversionCode=${{ github.run_number }} 2>&1 | tee build.log
+
+      - name: Pubblica l'APK (release "latest")
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk heatlogger.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest heatlogger.apk \
+            --title "Heatlogger 0.1.${{ github.run_number }}" \
+            --notes "Build ${{ github.run_number }} del commit ${{ github.sha }}. Scarica heatlogger.apk dal telefono e installalo sopra la versione precedente."
+
+      # Il registro della compilazione finisce nel ramo ci-log, così è leggibile anche senza accedere a GitHub
+      - name: Salva il registro di compilazione
+        if: always()
+        run: |
+          mkdir -p /tmp/ci && cp build.log /tmp/ci/ 2>/dev/null || echo "nessun registro" > /tmp/ci/build.log
+          echo "${{ job.status }} build=${{ github.run_number }} sha=${{ github.sha }}" > /tmp/ci/status.txt
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git checkout --orphan ci-log
+          git rm -rf . -q
+          cp /tmp/ci/build.log /tmp/ci/status.txt .
+          git add build.log status.txt
+          git commit -qm "registro build ${{ github.run_number }}"
+          git push -f origin ci-log

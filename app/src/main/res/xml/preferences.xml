@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="Pause (GPS spento)">
+        <EditTextPreference
+            app:key="wifi_home"
+            app:title="Wi-Fi di casa"
+            app:dialogMessage="Nome della rete (SSID). Più reti separate da virgola."
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="wifi_work"
+            app:title="Wi-Fi del lavoro"
+            app:dialogMessage="Nome della rete (SSID). Più reti separate da virgola."
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="still_minutes"
+            app:defaultValue="4"
+            app:title="Minuti da fermo prima della pausa"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="heartbeat_minutes"
+            app:defaultValue="30"
+            app:title="Battito durante le pause (minuti)"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Intervalli di registrazione (secondi)">
+        <EditTextPreference app:key="interval_vehicle" app:defaultValue="15" app:title="In auto" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="interval_bicycle" app:defaultValue="30" app:title="In bici" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="interval_running" app:defaultValue="30" app:title="Di corsa" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="interval_walking" app:defaultValue="60" app:title="A piedi" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="interval_unknown" app:defaultValue="45" app:title="Modo non ancora riconosciuto" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="vehicle_kmh"
+            app:defaultValue="25"
+            app:title="Velocità da veicolo (km/h)"
+            app:summary="Usata solo se il riconoscimento dell'attività non è disponibile" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Google Drive (per la Heatmap)">
+        <SwitchPreferenceCompat app:key="drive_enabled" app:defaultValue="true" app:title="Carica i GPX su Drive" />
+        <EditTextPreference app:key="drive_folder" app:defaultValue="Heatlogger" app:title="Cartella su Drive" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="drive_minutes" app:defaultValue="60" app:title="Ogni quanti minuti (minimo 15)" app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Server Quantified Self">
+        <SwitchPreferenceCompat app:key="qs_enabled" app:defaultValue="false" app:title="Invia al server" />
+        <EditTextPreference app:key="qs_url" app:title="URL" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="qs_token" app:title="Token (Authorization: Bearer)" />
+        <EditTextPreference app:key="qs_device" app:defaultValue="pixel" app:title="Nome dispositivo (device)" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="qs_source" app:defaultValue="heatlogger" app:title="Sorgente (source)" app:useSimpleSummaryProvider="true" />
+        <EditTextPreference app:key="qs_minutes" app:defaultValue="10" app:title="Invio ogni (minuti)" app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+</PreferenceScreen>
