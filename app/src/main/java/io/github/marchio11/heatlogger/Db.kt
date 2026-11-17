@@ -185,6 +185,40 @@ class Db private constructor(context: Context) :
             writableDatabase.execSQL("UPDATE pauses SET qs_done = 1 WHERE end_time IS NOT NULL AND id IN (${pauseIds.joinToString(",")})")
     }
 
+    /**
+     * Correzione a posteriori: tra [from] e [to] si era a piedi ma l'app aveva lasciato "auto".
+     * Punti e attività vengono rietichettati e segnati da reinviare (il server li riceve corretti).
+     */
+    fun relabelVehicleAsWalking(from: Long, to: Long) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "UPDATE points SET act = 'walking', qs_sent = 0 WHERE time >= ? AND time < ? AND act = 'vehicle'",
+                arrayOf<Any>(from, to),
+            )
+            val rows = ArrayList<ActivityRow>()
+            db.rawQuery(
+                "SELECT id,type,start,end_time,confidence FROM activities WHERE type = 'vehicle' AND start < ? AND (end_time IS NULL OR end_time > ?)",
+                arrayOf("$to", "$from"),
+            ).use { c -> while (c.moveToNext()) rows += ActivityRow(c.getLong(0), c.getString(1), c.getLong(2), c.lngOrNull(3), c.getInt(4)) }
+            for (r in rows) {
+                if (r.start >= from) {
+                    db.execSQL("UPDATE activities SET type = 'walking', qs_done = 0 WHERE id = ?", arrayOf<Any>(r.id))
+                } else {
+                    db.execSQL("UPDATE activities SET end_time = ?, qs_done = 0 WHERE id = ?", arrayOf<Any>(from, r.id))
+                    db.insert("activities", null, ContentValues().apply {
+                        put("type", "walking"); put("start", from); put("confidence", 100)
+                        r.end?.let { put("end_time", it) }
+                    })
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Dopo un riavvio dell'app chiude le voci rimaste aperte all'ultimo momento noto. */
     fun closeDangling(at: Long) {
         writableDatabase.execSQL("UPDATE activities SET end_time = ? WHERE end_time IS NULL", arrayOf<Any>(at))
