@@ -105,6 +105,10 @@ class TrackingService : Service() {
     private var candidateCount = 0
     private var activityUpdatesOn = false
     private var stillSince: Long? = null
+    // Uscita dall'auto: segnali "non auto" consecutivi (a piedi e fermo insieme, come col cane)
+    private var offVehicle = 0
+    private var offFoot: Mode? = null
+    private var lastVehicleSeen = 0L
 
     // Pausa in corso
     private var pauseId: Long? = null
@@ -377,10 +381,12 @@ class TrackingService : Service() {
                 fastFixes = 0
             }
         }
-        if (!activityUpdatesOn && mode == Mode.VEHICLE) {
-            if (kmh < 12) {
+        // Lento a lungo e il riconoscimento non dice più "auto" da qualche minuto: si è scesi
+        val vehicleQuiet = !activityUpdatesOn || System.currentTimeMillis() - lastVehicleSeen > 180_000L
+        if (mode == Mode.VEHICLE && vehicleQuiet && acc < 60) {
+            if (kmh < 10) {
                 val since = slowSince ?: loc.time.also { slowSince = it }
-                if (loc.time - since > 120_000L) setMode(Mode.WALKING, 50)
+                if (loc.time - since > (if (activityUpdatesOn) 180_000L else 120_000L)) setMode(Mode.WALKING, 50)
             } else {
                 slowSince = null
             }
@@ -441,6 +447,32 @@ class TrackingService : Service() {
             return
         }
 
+        if (m == Mode.VEHICLE && confidence >= 50) lastVehicleSeen = System.currentTimeMillis()
+
+        // In auto: "a piedi" e "fermo" che si alternano (passeggiata col cane) contano insieme
+        // come segnali di uscita. Prima ognuno azzerava l'altro e si restava "in auto" per sempre.
+        if (mode == Mode.VEHICLE) {
+            if (m == Mode.VEHICLE) {
+                if (confidence >= 50) { offVehicle = 0; offFoot = null }
+                return
+            }
+            if (confidence < 50) return
+            offVehicle++
+            if (m != Mode.STILL) offFoot = m
+            val foot = offFoot
+            if (foot != null && offVehicle >= 2) {
+                offVehicle = 0; offFoot = null
+                setMode(foot, confidence)
+            } else if (offVehicle >= 3) {
+                offVehicle = 0; offFoot = null
+                stillSince = System.currentTimeMillis()
+                setMode(Mode.STILL, confidence)
+                main.removeCallbacks(stillCheck)
+                main.postDelayed(stillCheck, prefs.stillMinutes * 60_000L)
+            }
+            return
+        }
+
         // Isteresi: un semaforo o una sosta del cane non sono un "arrivo"
         val moving = mode == Mode.VEHICLE || mode == Mode.BICYCLE || mode == Mode.RUNNING || mode == Mode.WALKING
         val needed = when {
@@ -475,6 +507,9 @@ class TrackingService : Service() {
         activityId?.let { db.closeActivity(it, now) }
         activityId = m.api?.let { db.openActivity(it, now, confidence) }
         mode = m
+        if (m == Mode.VEHICLE) lastVehicleSeen = now
+        offVehicle = 0
+        offFoot = null
         fastFixes = 0
         slowSince = null
         recordTransition()
