@@ -125,6 +125,8 @@ class TrackingService : Service() {
     private var slowSince: Long? = null
     private var requestKey: String? = null
     private var refining = false
+    private var lastDelivery = 0L // ultima posizione ricevuta da Android (anche se doppia)
+    private var lastActivityAt = 0L
 
     // Wi-Fi
     private var currentSsid: String? = null
@@ -136,11 +138,33 @@ class TrackingService : Service() {
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
+            lastDelivery = System.currentTimeMillis()
             for (loc in result.locations) handleLocation(loc, if (pauseId != null) "heartbeat" else "fix")
         }
     }
 
     private val stillCheck = Runnable { checkStill() }
+
+    // Autocontrollo: il 17/11 dopo un aggiornamento il servizio era vivo ma Android non gli mandava
+    // più né posizioni né attività. Se tace troppo a lungo mentre ci si muove, si riabbona a tutto.
+    private val watchdog = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            val limit = max(180_000L, intervalFor(mode) * 3_000L)
+            if (pauseId == null && now - lastDelivery > limit) {
+                prefs.setStatus("watchdog", "GPS riavviato alle ${timeFmt.format(Date(now))}")
+                lastDelivery = now
+                requestKey = null
+                applyRequest()
+                recordTransition()
+                if (activityUpdatesOn && now - lastActivityAt > limit) {
+                    runCatching { ActivityRecognition.getClient(this@TrackingService).removeActivityUpdates(activityPendingIntent()) }
+                    startActivityRecognition()
+                }
+            }
+            main.postDelayed(this, 60_000L)
+        }
+    }
     private val wifiEndCheck = Runnable { confirmWifiLost() }
     private val qsTick = object : Runnable {
         override fun run() {
@@ -187,6 +211,9 @@ class TrackingService : Service() {
         recordTransition()
         Uploads.schedule(this)
         main.postDelayed(qsTick, 60_000L)
+        lastDelivery = System.currentTimeMillis()
+        lastActivityAt = lastDelivery
+        main.postDelayed(watchdog, 60_000L)
         updateStatus()
     }
 
@@ -429,6 +456,7 @@ class TrackingService : Service() {
 
     /** Chiamato da [ActivityReceiver] con l'attività più probabile. */
     fun onActivity(type: Int, confidence: Int) {
+        lastActivityAt = System.currentTimeMillis()
         val m = modeOf(type) ?: return
         prefs.setStatus("detected", "${m.label} ($confidence%)")
         if (m == candidate) candidateCount++ else { candidate = m; candidateCount = 1 }

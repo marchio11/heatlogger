@@ -80,6 +80,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Registrazione accesa ma servizio sparito (es. dopo un aggiornamento): lo riavvio da qui
+        if (prefs.running && TrackingService.instance == null) runCatching { TrackingService.start(this) }
         handler.post(refresher)
     }
 
@@ -224,6 +226,8 @@ class MainActivity : AppCompatActivity() {
             if (prefs.qsEnabled) append(line("Server QS", prefs.status("qs").ifBlank { "in attesa" } + " · in coda ${db.unsentCount()}"))
             if (prefs.driveEnabled) append(line("Drive", prefs.status("drive").ifBlank { "non ancora collegato" }))
             if (missing.isNotEmpty()) append(line("⚠️ Mancano", missing.joinToString(", ")))
+            append(line("🔧 Autocontrollo", prefs.status("watchdog")))
+            append(line("💥 Ultimo errore", prefs.status("crash")))
             append("Versione: ${BuildConfig.VERSION_NAME}")
         }
     }
