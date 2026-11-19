@@ -85,7 +85,8 @@ class TrackingService : Service() {
 
         fun modeOf(type: Int): Mode? = when (type) {
             DetectedActivity.IN_VEHICLE -> Mode.VEHICLE
-            DetectedActivity.ON_BICYCLE -> Mode.BICYCLE
+            // niente bici: il riconoscimento la scambia per soste dopo aver parcheggiato (19/11)
+            DetectedActivity.ON_BICYCLE -> null
             DetectedActivity.RUNNING -> Mode.RUNNING
             DetectedActivity.WALKING, DetectedActivity.ON_FOOT -> Mode.WALKING
             DetectedActivity.STILL -> Mode.STILL
@@ -133,6 +134,7 @@ class TrackingService : Service() {
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var wifiLostAt: Long? = null
     private var wifiOverride: String? = null // rete da ignorare finché non ci si ricollega (partiti in auto)
+    private var wifiOverrideAt = 0L
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.ITALY)
 
@@ -466,7 +468,12 @@ class TrackingService : Service() {
             // Sul Wi-Fi di casa/lavoro i movimenti tra una stanza e l'altra non contano,
             // ma se si parte in auto il Wi-Fi è ancora agganciato: si riparte subito
             if (m == Mode.VEHICLE && sure) {
-                wifiOverride = pauseSsid
+                // Solo se si è ancora agganciati a quella rete: se il Wi-Fi è già caduto (19/11, "auto"
+                // arrivata durante i 30 s di attesa) non arriverebbe più l'evento che toglie il promemoria
+                if (currentSsid != null && currentSsid == pauseSsid) {
+                    wifiOverride = pauseSsid
+                    wifiOverrideAt = System.currentTimeMillis()
+                }
                 main.removeCallbacks(wifiEndCheck)
                 wifiLostAt = null
                 endPause(System.currentTimeMillis())
@@ -625,6 +632,8 @@ class TrackingService : Service() {
 
     private fun onWifi(ssid: String?) {
         if (ssid != wifiOverride) wifiOverride = null
+        // il promemoria vale al massimo 15 minuti: dopo, la rete di casa torna a contare comunque
+        if (wifiOverride != null && System.currentTimeMillis() - wifiOverrideAt > 15 * 60_000L) wifiOverride = null
         currentSsid = ssid
         prefs.setStatus("ssid", ssid ?: "")
         val reason = when {
