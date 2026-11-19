@@ -153,16 +153,20 @@ class TrackingService : Service() {
         override fun run() {
             val now = System.currentTimeMillis()
             val limit = max(180_000L, intervalFor(mode) * 3_000L)
+            // Riconoscimento muto mentre ci si muove (19/11: fermo su "Fermo 79%" per ore dopo
+            // l'aggiornamento, mentre il GPS funzionava): mi iscrivo di nuovo
+            if (pauseId == null && activityUpdatesOn && now - lastActivityAt > 5 * 60_000L) {
+                prefs.setStatus("watchdog", "riconoscimento riavviato alle ${timeFmt.format(Date(now))}")
+                lastActivityAt = now
+                resubscribeActivity()
+            }
             if (pauseId == null && now - lastDelivery > limit) {
                 prefs.setStatus("watchdog", "GPS riavviato alle ${timeFmt.format(Date(now))}")
                 lastDelivery = now
                 requestKey = null
                 applyRequest()
                 recordTransition()
-                if (activityUpdatesOn && now - lastActivityAt > limit) {
-                    runCatching { ActivityRecognition.getClient(this@TrackingService).removeActivityUpdates(activityPendingIntent()) }
-                    startActivityRecognition()
-                }
+                if (activityUpdatesOn && now - lastActivityAt > limit) resubscribeActivity()
             }
             main.postDelayed(this, 60_000L)
         }
@@ -216,6 +220,13 @@ class TrackingService : Service() {
         lastDelivery = System.currentTimeMillis()
         lastActivityAt = lastDelivery
         main.postDelayed(watchdog, 60_000L)
+        // Dopo un aggiornamento i servizi Google cancellano le iscrizioni dell'app, a volte qualche
+        // secondo DOPO che l'app si è già iscritta di nuovo: dopo 90 secondi rinnovo tutto
+        main.postDelayed({
+            requestKey = null
+            applyRequest()
+            if (activityUpdatesOn) resubscribeActivity()
+        }, 90_000L)
         updateStatus()
     }
 
@@ -438,6 +449,11 @@ class TrackingService : Service() {
         this, 7, Intent(this, ActivityReceiver::class.java),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
     )
+
+    private fun resubscribeActivity() {
+        runCatching { ActivityRecognition.getClient(this).removeActivityUpdates(activityPendingIntent()) }
+        startActivityRecognition()
+    }
 
     private fun startActivityRecognition() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
